@@ -1,0 +1,857 @@
+# =============================================================================
+#  Logistics API: roteiro executável de requisições
+# =============================================================================
+#
+# Cada bloco separado por "###" é uma requisição. Lido de cima para baixo, o
+# arquivo conta a história da API:
+#
+#   1. identidade: cadastro, login de cliente e de operador
+#   2. jornada de um envio: criar, consultar, listar, despachar, entregar, rastrear
+#   3. frete: as quatro faixas da tabela, com endereços reais
+#   4. cancelamento
+#   5. erros: segurança, validação e regras de negócio, todos em RFC 9457
+#   6. operação: health, métricas e contrato OpenAPI
+#
+# Toda requisição traz asserts (client.test) com o status e os campos
+# esperados. Rodando o arquivo inteiro, ele vira um smoke test de ponta a ponta
+# contra uma API de verdade, com ViaCEP, RabbitMQ e MongoDB reais. Ele
+# complementa os testes automatizados (ShipmentJourneyIT), mas não os
+# substitui: não roda no build, porque depende de internet e de uma API no ar.
+#
+# -----------------------------------------------------------------------------
+#  COMO RODAR
+# -----------------------------------------------------------------------------
+#
+#  1. Suba a API em http://localhost:8080, com o operador de bootstrap. Qualquer
+#     uma das formas do README serve:
+#
+#       docker compose up -d --build
+#       ./mvnw spring-boot:test-run
+#       ./mvnw spring-boot:run -Dspring-boot.run.profiles=local   (infra do compose)
+#
+#  2. Execute com uma destas ferramentas:
+#
+#     IntelliJ IDEA (HTTP Client)
+#       Clique no ▶ ao lado de cada requisição, ou em "Run All Requests in File"
+#       no topo do editor. Ao rodar requisições soltas, rode a seção 1 antes:
+#       ela guarda os tokens e IDs que as outras usam.
+#
+#     Terminal ou CI: CLI oficial da JetBrains (ijhttp), só com Docker
+#       docker run --rm --network host -v "$PWD/docs/api:/workdir" \
+#         jetbrains/intellij-http-client requests.http
+#       No Docker Desktop (macOS/Windows), troque "--network host" por "-D", que
+#       faz "localhost" apontar para a máquina hospedeira.
+#
+#     VS Code: extensão httpYac, que entende esta sintaxe, inclusive os scripts
+#       > {% %}. Também tem CLI:
+#       npx httpyac send docs/api/requests.http --all
+#
+#  A criação de envios consulta a ViaCEP de verdade, então é preciso internet.
+#  A ViaCEP é gratuita e sem SLA, e às vezes falha. Quando ela falha nas duas
+#  tentativas do retry, a API responde 503 com Retry-After (o comportamento
+#  projetado), e os asserts das requisições que dependem daquele envio falham em
+#  cascata. Rode de novo. No log da API, procure por "Dependency unavailable".
+#
+# -----------------------------------------------------------------------------
+#  POR QUE A SINTAXE DO INTELLIJ (E ONDE ELA NÃO FUNCIONA)
+# -----------------------------------------------------------------------------
+#
+#  Não existe padrão formal para arquivos .http. As duas sintaxes populares
+#  divergem exatamente no que este roteiro mais usa: encadear requisições, ou
+#  seja, levar o token do login para as chamadas seguintes.
+#
+#    IntelliJ e httpYac:      > {% client.global.set("token", response.body.accessToken) %}
+#    REST Client (VS Code):   # @name login   e depois   {{login.response.body.$.accessToken}}
+#
+#  Ficamos com a do IntelliJ por três motivos: é a IDE dominante no ecossistema
+#  Java, tem CLI oficial para CI e também é aceita pelo httpYac. Manter um
+#  segundo arquivo com o mesmo conteúdo em outra sintaxe seria pedir para os
+#  dois divergirem.
+#
+#  NÃO funciona na extensão "REST Client" (humao.rest-client). Ela não executa
+#  os scripts > {% %}, então tokens e IDs não são capturados e as chamadas
+#  autenticadas respondem 401.
+#
+# -----------------------------------------------------------------------------
+#  PODE RODAR QUANTAS VEZES QUISER
+# -----------------------------------------------------------------------------
+#
+#  Os e-mails levam um timestamp ({{$timestamp}}), então cada execução cadastra
+#  clientes novos e não esbarra no 409 de e-mail duplicado. Tokens e IDs ficam
+#  em variáveis globais (client.global.set) e são sobrescritos a cada execução.
+#  Os tokens valem 30 minutos. Depois disso, rode a seção 1 de novo.
+# =============================================================================
+
+@baseUrl = http://localhost:8080
+
+# Senha das contas de cliente criadas aqui. Mínimo de 8 caracteres.
+@password = senha-forte-123
+
+# Operador criado na inicialização pelo OperatorBootstrapRunner. Estes são os
+# valores do perfil "local" e do docker-compose.yml. Se você mudou
+# OPERATOR_EMAIL ou OPERATOR_PASSWORD no .env, ajuste aqui.
+@operatorEmail = operador@logistics.local
+@operatorPassword = operador-local-123
+
+# CEPs reais. Todos os envios saem da Praça da Sé (São Paulo/SP) e pesam 1,5 kg.
+# O peso é cobrado por quilo iniciado (2 kg x R$ 2,50 = R$ 5,00) e somado à
+# base da faixa da rota (application.yml, app.shipping.freight):
+#
+#   destino                              faixa           base    total
+#   01310-100 Av. Paulista, São Paulo    SAME_CITY       12,00   17,00
+#   13010-111 Centro, Campinas/SP        SAME_STATE      18,00   23,00
+#   20040-020 Centro, Rio de Janeiro/RJ  SAME_REGION     25,00   30,00
+#   69005-010 Centro, Manaus/AM          INTERREGIONAL   35,00   40,00
+@originPostalCode = 01001-000
+@sameCityPostalCode = 01310-100
+@sameStatePostalCode = 13010-111
+@sameRegionPostalCode = 20040-020
+@interregionalPostalCode = 69005-010
+
+# Formato válido, mas o CEP não existe: a ViaCEP responde {"erro": "true"}.
+@unknownPostalCode = 99999-999
+
+
+# =============================================================================
+#  1. IDENTIDADE: cadastro e login
+# =============================================================================
+
+### 1.1 Cadastrar cliente (público)
+# Rota pública, porque quem se cadastra ainda não tem token. Todo cadastro por
+# aqui nasce com o papel CUSTOMER; operadores só existem via bootstrap.
+# O Location aponta para o recurso criado (201 Created, RFC 9110).
+POST {{baseUrl}}/api/v1/users
+Content-Type: application/json
+
+{
+  "email": "ana.{{$timestamp}}@example.com",
+  "password": "{{password}}"
+}
+
+> {%
+    client.test("201 Created, papel CUSTOMER e Location do novo recurso", function () {
+        client.assert(response.status === 201, "status: " + response.status);
+        client.assert(response.body.role === "CUSTOMER", "role: " + response.body.role);
+        client.assert(response.headers.valueOf("Location") === "/api/v1/users/" + response.body.id,
+            "Location: " + response.headers.valueOf("Location"));
+    });
+    client.global.set("customerId", response.body.id);
+    client.global.set("customerEmail", response.body.email);
+%}
+
+### 1.2 Login do cliente
+# Troca e-mail e senha por um JWT assinado (HS256), válido por 30 minutos. A API
+# não guarda sessão: o token vai em toda requisição, no header Authorization.
+# expiresIn é o tempo restante em segundos, medido na hora da resposta (por
+# isso costuma vir 1799, e não 1800).
+POST {{baseUrl}}/api/v1/auth/token
+Content-Type: application/json
+
+{
+  "email": "{{customerEmail}}",
+  "password": "{{password}}"
+}
+
+> {%
+    client.test("200 OK com token Bearer de até 30 minutos", function () {
+        client.assert(response.status === 200, "status: " + response.status);
+        client.assert(response.body.tokenType === "Bearer", "tokenType: " + response.body.tokenType);
+        client.assert(response.body.expiresIn > 0 && response.body.expiresIn <= 1800,
+            "expiresIn: " + response.body.expiresIn);
+    });
+    client.global.set("customerToken", response.body.accessToken);
+%}
+
+### 1.3 Login do operador
+# Mesmo endpoint, outro papel: o token do operador carrega a claim
+# "roles": ["OPERATOR"], que o Spring Security converte em ROLE_OPERATOR.
+POST {{baseUrl}}/api/v1/auth/token
+Content-Type: application/json
+
+{
+  "email": "{{operatorEmail}}",
+  "password": "{{operatorPassword}}"
+}
+
+> {%
+    client.test("200 OK (se falhar, confira se o operador de bootstrap foi criado)", function () {
+        client.assert(response.status === 200, "status: " + response.status);
+    });
+    client.global.set("operatorToken", response.body.accessToken);
+%}
+
+### 1.4 Consultar o próprio cadastro
+# Cada pessoa vê o próprio cadastro, e operadores veem qualquer um (1.5).
+# Para qualquer outra pessoa a resposta é 404, não 403 (ver 5.6).
+GET {{baseUrl}}/api/v1/users/{{customerId}}
+Authorization: Bearer {{customerToken}}
+
+> {%
+    client.test("200 OK com os dados do cadastro, sem a senha", function () {
+        client.assert(response.status === 200, "status: " + response.status);
+        client.assert(response.body.email === client.global.get("customerEmail"), "email: " + response.body.email);
+        client.assert(response.body.password === undefined && response.body.passwordHash === undefined,
+            "a resposta não pode expor a senha nem o hash");
+    });
+%}
+
+### 1.5 Operador consulta o cadastro de um cliente
+GET {{baseUrl}}/api/v1/users/{{customerId}}
+Authorization: Bearer {{operatorToken}}
+
+> {%
+    client.test("200 OK", function () {
+        client.assert(response.status === 200, "status: " + response.status);
+    });
+%}
+
+
+# =============================================================================
+#  2. JORNADA DE UM ENVIO: criar, consultar, despachar, entregar, rastrear
+# =============================================================================
+
+### 2.1 Criar envio de São Paulo para o Rio de Janeiro
+# O cliente informa só CEP, número e complemento. A API completa o endereço com
+# a ViaCEP (rua, bairro, cidade, UF) e calcula o frete. SP e RJ ficam na mesma
+# região (Sudeste): 25,00 de base + 2 kg x 2,50 = R$ 30,00.
+# O dono do envio vem do token, nunca do corpo. Não há como criar um envio em
+# nome de outra pessoa.
+POST {{baseUrl}}/api/v1/shipments
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{
+  "origin": {
+    "postalCode": "{{originPostalCode}}",
+    "number": "100",
+    "complement": "Sala 1"
+  },
+  "destination": {
+    "postalCode": "{{sameRegionPostalCode}}",
+    "number": "10"
+  },
+  "weightGrams": 1500
+}
+
+> {%
+    client.test("201 Created, endereço completado pela ViaCEP e frete de R$ 30,00", function () {
+        client.assert(response.status === 201, "status: " + response.status);
+        client.assert(response.body.status === "CREATED", "status do envio: " + response.body.status);
+        client.assert(response.body.customerId === client.global.get("customerId"), "customerId: " + response.body.customerId);
+        client.assert(response.body.destination.city === "Rio de Janeiro" && response.body.destination.state === "RJ",
+            "destino: " + JSON.stringify(response.body.destination));
+        client.assert(response.body.freight.amount === 30 && response.body.freight.currency === "BRL",
+            "frete: " + JSON.stringify(response.body.freight));
+        client.assert(response.headers.valueOf("Location") === "/api/v1/shipments/" + response.body.id,
+            "Location: " + response.headers.valueOf("Location"));
+    });
+    client.global.set("shipmentId", response.body.id);
+%}
+
+### 2.2 Consultar o envio
+GET {{baseUrl}}/api/v1/shipments/{{shipmentId}}
+Authorization: Bearer {{customerToken}}
+
+> {%
+    client.test("200 OK", function () {
+        client.assert(response.status === 200, "status: " + response.status);
+        client.assert(response.body.id === client.global.get("shipmentId"), "id: " + response.body.id);
+    });
+%}
+
+### 2.3 Listar os próprios envios
+# Clientes veem só os próprios envios. O filtro pelo dono entra na consulta ao
+# banco, e não depois dela, então a paginação conta só o que é do cliente.
+# Ordem fixa: mais recentes primeiro. size vai de 1 a 100; o teto impede que
+# alguém peça um milhão de linhas de uma vez (ver 5.11).
+GET {{baseUrl}}/api/v1/shipments?page=0&size=10
+Authorization: Bearer {{customerToken}}
+
+> {%
+    client.test("200 OK, só envios do próprio cliente, o mais recente primeiro", function () {
+        var customerId = client.global.get("customerId");
+        client.assert(response.status === 200, "status: " + response.status);
+        client.assert(response.body.content.length >= 1, "a lista veio vazia");
+        client.assert(response.body.content.every(function (s) { return s.customerId === customerId; }),
+            "apareceu envio de outro cliente");
+        client.assert(response.body.content[0].id === client.global.get("shipmentId"),
+            "o envio criado em 2.1 deveria ser o primeiro");
+    });
+%}
+
+### 2.4 Operador lista os envios aguardando despacho
+# Operadores veem os envios de todos os clientes. O filtro por status é opcional.
+GET {{baseUrl}}/api/v1/shipments?status=CREATED&page=0&size=5
+Authorization: Bearer {{operatorToken}}
+
+> {%
+    client.test("200 OK, só envios CREATED", function () {
+        client.assert(response.status === 200, "status: " + response.status);
+        client.assert(response.body.size === 5, "size: " + response.body.size);
+        client.assert(response.body.content.every(function (s) { return s.status === "CREATED"; }),
+            "apareceu envio fora do filtro");
+    });
+%}
+
+### 2.5 Despachar (operador): CREATED → IN_TRANSIT
+# Cada transição é uma ação explícita (POST /{id}/dispatch), não um PATCH no
+# campo status. Assim cada uma mapeia para um método do agregado, que valida a
+# regra. É POST porque a ação não é idempotente: repetir a chamada dá 409.
+POST {{baseUrl}}/api/v1/shipments/{{shipmentId}}/dispatch
+Authorization: Bearer {{operatorToken}}
+
+> {%
+    client.test("200 OK, IN_TRANSIT", function () {
+        client.assert(response.status === 200, "status: " + response.status);
+        client.assert(response.body.status === "IN_TRANSIT", "status do envio: " + response.body.status);
+    });
+%}
+
+### 2.6 Registrar a entrega (operador): IN_TRANSIT → DELIVERED
+POST {{baseUrl}}/api/v1/shipments/{{shipmentId}}/deliver
+Authorization: Bearer {{operatorToken}}
+
+> {%
+    client.test("200 OK, DELIVERED", function () {
+        client.assert(response.status === 200, "status: " + response.status);
+        client.assert(response.body.status === "DELIVERED", "status do envio: " + response.body.status);
+    });
+%}
+
+### 2.7 Histórico de rastreamento (MongoDB, consistência eventual)
+# Esta leitura vem do MongoDB, não do PostgreSQL. O caminho de cada evento:
+#   1. a mudança de estado grava o evento na tabela outbox_messages, na mesma
+#      transação do envio;
+#   2. o OutboxRelay publica no RabbitMQ (a cada 1 s);
+#   3. o TrackingProjectionListener consome e grava no MongoDB.
+# Por isso, logo depois do 2.6, a lista pode vir incompleta, ou até vazia
+# quando o arquivo roda inteiro de uma vez. Espere um ou dois segundos e rode
+# de novo para ver CREATED, IN_TRANSIT e DELIVERED.
+GET {{baseUrl}}/api/v1/shipments/{{shipmentId}}/tracking
+Authorization: Bearer {{customerToken}}
+
+> {%
+    client.test("200 OK, eventos em ordem cronológica", function () {
+        var events = response.body.events;
+        client.assert(response.status === 200, "status: " + response.status);
+        for (var i = 1; i < events.length; i++) {
+            client.assert(Date.parse(events[i - 1].occurredAt) <= Date.parse(events[i].occurredAt),
+                "fora de ordem: " + JSON.stringify(events));
+        }
+    });
+    var statuses = response.body.events.map(function (e) { return e.status; });
+    client.log("Eventos projetados até agora (" + statuses.length + " de 3): "
+        + (statuses.length > 0 ? statuses.join(" → ") : "nenhum ainda, rode de novo em instantes"));
+%}
+
+
+# =============================================================================
+#  3. FRETE: as outras três faixas da tabela
+# =============================================================================
+# A faixa depende só de origem e destino: mesma cidade, mesmo estado, mesma
+# região ou inter-regional (RouteType). A regra mora no domínio
+# (FreightCalculator); os valores vêm da configuração. O 2.1 já cobriu a mesma
+# região (R$ 30,00).
+
+### 3.1 Mesma cidade: Praça da Sé → Av. Paulista (R$ 17,00)
+POST {{baseUrl}}/api/v1/shipments
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{
+  "origin": { "postalCode": "{{originPostalCode}}", "number": "100" },
+  "destination": { "postalCode": "{{sameCityPostalCode}}", "number": "500" },
+  "weightGrams": 1500
+}
+
+> {%
+    client.test("201 Created, R$ 17,00 (12,00 + 5,00)", function () {
+        client.assert(response.status === 201, "status: " + response.status);
+        client.assert(response.body.freight.amount === 17, "frete: " + JSON.stringify(response.body.freight));
+    });
+%}
+
+### 3.2 Mesmo estado: São Paulo → Campinas (R$ 23,00)
+POST {{baseUrl}}/api/v1/shipments
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{
+  "origin": { "postalCode": "{{originPostalCode}}", "number": "100" },
+  "destination": { "postalCode": "{{sameStatePostalCode}}", "number": "200" },
+  "weightGrams": 1500
+}
+
+> {%
+    client.test("201 Created, R$ 23,00 (18,00 + 5,00)", function () {
+        client.assert(response.status === 201, "status: " + response.status);
+        client.assert(response.body.freight.amount === 23, "frete: " + JSON.stringify(response.body.freight));
+    });
+%}
+
+### 3.3 Inter-regional: São Paulo → Manaus (R$ 40,00)
+# Este envio fica em CREATED e é cancelado na seção 4.
+POST {{baseUrl}}/api/v1/shipments
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{
+  "origin": { "postalCode": "{{originPostalCode}}", "number": "100" },
+  "destination": { "postalCode": "{{interregionalPostalCode}}", "number": "300" },
+  "weightGrams": 1500
+}
+
+> {%
+    client.test("201 Created, R$ 40,00 (35,00 + 5,00)", function () {
+        client.assert(response.status === 201, "status: " + response.status);
+        client.assert(response.body.freight.amount === 40, "frete: " + JSON.stringify(response.body.freight));
+    });
+    client.global.set("cancellableShipmentId", response.body.id);
+%}
+
+
+# =============================================================================
+#  4. CANCELAMENTO
+# =============================================================================
+
+### 4.1 Cancelar o envio (dono): CREATED → CANCELLED
+# Só envios ainda não despachados podem ser cancelados, pelo dono ou por um
+# operador. O motivo é obrigatório e fica registrado no envio. Cancelar um
+# envio já entregue dá 409 (ver 5.13).
+POST {{baseUrl}}/api/v1/shipments/{{cancellableShipmentId}}/cancel
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{
+  "reason": "Cliente desistiu da compra"
+}
+
+> {%
+    client.test("200 OK, CANCELLED com o motivo registrado", function () {
+        client.assert(response.status === 200, "status: " + response.status);
+        client.assert(response.body.status === "CANCELLED", "status do envio: " + response.body.status);
+        client.assert(response.body.cancellationReason === "Cliente desistiu da compra",
+            "motivo: " + response.body.cancellationReason);
+    });
+%}
+
+
+# =============================================================================
+#  5. ERROS: todos no formato RFC 9457 (application/problem+json)
+# =============================================================================
+# Todo erro, de qualquer origem, tem o mesmo formato: type, title, status,
+# detail, instance, mais três campos nossos:
+#   code           estável, para programas: o cliente decide o que fazer por ele
+#   timestamp      quando o erro aconteceu (UTC)
+#   correlationId  o mesmo ID dos logs da requisição (ver 5.16)
+# O detail é texto para pessoas e pode mudar; o code, não.
+
+### 5.1 Sem token → 401
+# O header WWW-Authenticate diz ao cliente como se autenticar (RFC 6750).
+GET {{baseUrl}}/api/v1/shipments
+
+> {%
+    client.test("401 UNAUTHENTICATED com desafio Bearer", function () {
+        client.assert(response.status === 401, "status: " + response.status);
+        client.assert(response.body.code === "UNAUTHENTICATED", "code: " + response.body.code);
+        client.assert(response.headers.valueOf("WWW-Authenticate").indexOf("Bearer") === 0,
+            "WWW-Authenticate: " + response.headers.valueOf("WWW-Authenticate"));
+    });
+%}
+
+### 5.2 Token forjado → 401
+# Um token "promovido" a OPERATOR, mas assinado sem o segredo do servidor.
+# Qualquer alteração no payload invalida a assinatura HMAC, e o Spring Security
+# rejeita o token antes de olhar as claims.
+GET {{baseUrl}}/api/v1/shipments
+Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJsb2dpc3RpY3MtYXBpIiwic3ViIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAwIiwicm9sZXMiOlsiT1BFUkFUT1IiXSwiZXhwIjo0MTAyNDQ0ODAwfQ.YXNzaW5hdHVyYS1mb3JqYWRhLXNlbS1vLXNlZ3JlZG8
+
+> {%
+    client.test("401 UNAUTHENTICATED com error=\"invalid_token\"", function () {
+        client.assert(response.status === 401, "status: " + response.status);
+        client.assert(response.body.code === "UNAUTHENTICATED", "code: " + response.body.code);
+        client.assert(response.headers.valueOf("WWW-Authenticate").indexOf("invalid_token") >= 0,
+            "WWW-Authenticate: " + response.headers.valueOf("WWW-Authenticate"));
+    });
+%}
+
+### 5.3 Cliente tentando despachar → 403
+# Autenticado, mas sem o papel exigido. O @PreAuthorize("hasRole('OPERATOR')")
+# barra a chamada antes de qualquer acesso ao banco, e o caso de uso confere o
+# papel de novo (defesa em profundidade).
+POST {{baseUrl}}/api/v1/shipments/{{shipmentId}}/dispatch
+Authorization: Bearer {{customerToken}}
+
+> {%
+    client.test("403 ACCESS_DENIED", function () {
+        client.assert(response.status === 403, "status: " + response.status);
+        client.assert(response.body.code === "ACCESS_DENIED", "code: " + response.body.code);
+    });
+%}
+
+### 5.4 Cadastrar um segundo cliente (preparação para o 5.6)
+POST {{baseUrl}}/api/v1/users
+Content-Type: application/json
+
+{
+  "email": "bruno.{{$timestamp}}@example.com",
+  "password": "{{password}}"
+}
+
+> {%
+    client.test("201 Created", function () {
+        client.assert(response.status === 201, "status: " + response.status);
+    });
+    client.global.set("otherCustomerEmail", response.body.email);
+%}
+
+### 5.5 Login do segundo cliente
+POST {{baseUrl}}/api/v1/auth/token
+Content-Type: application/json
+
+{
+  "email": "{{otherCustomerEmail}}",
+  "password": "{{password}}"
+}
+
+> {%
+    client.test("200 OK", function () {
+        client.assert(response.status === 200, "status: " + response.status);
+    });
+    client.global.set("otherCustomerToken", response.body.accessToken);
+%}
+
+### 5.6 Segundo cliente tenta ler o envio do primeiro → 404, e não 403
+# Proteção contra IDOR/BOLA, o risco número 1 do OWASP API Security Top 10
+# (API1:2023). O envio existe, mas responder 403 confirmaria isso. Com 404, o
+# envio alheio é indistinguível de um inexistente. A checagem do dono fica no
+# caso de uso (ShipmentAccess), não no controller, então vale para qualquer
+# adaptador de entrada.
+GET {{baseUrl}}/api/v1/shipments/{{shipmentId}}
+Authorization: Bearer {{otherCustomerToken}}
+
+> {%
+    client.test("404 SHIPMENT_NOT_FOUND", function () {
+        client.assert(response.status === 404, "status: " + response.status);
+        client.assert(response.body.code === "SHIPMENT_NOT_FOUND", "code: " + response.body.code);
+    });
+%}
+
+### 5.7 Tentativa de mass assignment → 201, mas o papel continua CUSTOMER
+# O corpo tenta se promover com "role": "OPERATOR". O DTO de cadastro não tem
+# esse campo, então o Jackson o ignora e o caso de uso cria CUSTOMER
+# (OWASP API3:2023). É por isso que a API nunca desserializa o corpo
+# diretamente numa entidade.
+POST {{baseUrl}}/api/v1/users
+Content-Type: application/json
+
+{
+  "email": "mallory.{{$timestamp}}@example.com",
+  "password": "{{password}}",
+  "role": "OPERATOR"
+}
+
+> {%
+    client.test("201 Created com role CUSTOMER", function () {
+        client.assert(response.status === 201, "status: " + response.status);
+        client.assert(response.body.role === "CUSTOMER", "role: " + response.body.role);
+    });
+%}
+
+### 5.8 Campos inválidos → 400 VALIDATION_FAILED, com a lista de campos
+# A Bean Validation no DTO barra o formato antes do caso de uso, e a resposta
+# lista todos os problemas de uma vez, não só o primeiro. As mensagens seguem o
+# Accept-Language: troque para en-US e veja em inglês.
+POST {{baseUrl}}/api/v1/shipments
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+Accept-Language: pt-BR
+
+{
+  "origin": { "postalCode": "0100-000", "number": "100" },
+  "destination": { "postalCode": "{{sameRegionPostalCode}}", "number": "" },
+  "weightGrams": 50000
+}
+
+> {%
+    client.test("400 VALIDATION_FAILED apontando os três campos", function () {
+        var fields = response.body.errors.map(function (e) { return e.field; }).sort();
+        client.assert(response.status === 400, "status: " + response.status);
+        client.assert(response.body.code === "VALIDATION_FAILED", "code: " + response.body.code);
+        client.assert(fields.join() === "destination.number,origin.postalCode,weightGrams",
+            "campos: " + fields.join());
+    });
+%}
+
+### 5.9 Corpo ilegível → 400 MALFORMED_REQUEST
+# "weightGrams" com texto em vez de número. JSON quebrado (uma chave sem
+# fechar, por exemplo) dá a mesma resposta. O detail é genérico de propósito:
+# a mensagem do parser expõe nomes de classes internas.
+POST {{baseUrl}}/api/v1/shipments
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{
+  "origin": { "postalCode": "{{originPostalCode}}", "number": "100" },
+  "destination": { "postalCode": "{{sameRegionPostalCode}}", "number": "10" },
+  "weightGrams": "um quilo e meio"
+}
+
+> {%
+    client.test("400 MALFORMED_REQUEST", function () {
+        client.assert(response.status === 400, "status: " + response.status);
+        client.assert(response.body.code === "MALFORMED_REQUEST", "code: " + response.body.code);
+    });
+%}
+
+### 5.10 ID que não é UUID → 400 INVALID_PARAMETER
+# Também vale para um status inexistente no filtro (?status=PERDIDO).
+GET {{baseUrl}}/api/v1/shipments/123
+Authorization: Bearer {{customerToken}}
+
+> {%
+    client.test("400 INVALID_PARAMETER", function () {
+        client.assert(response.status === 400, "status: " + response.status);
+        client.assert(response.body.code === "INVALID_PARAMETER", "code: " + response.body.code);
+    });
+%}
+
+### 5.11 Página grande demais → 400
+# O teto de 100 itens por página protege o banco e a memória da aplicação.
+GET {{baseUrl}}/api/v1/shipments?size=500
+Authorization: Bearer {{customerToken}}
+
+> {%
+    client.test("400 VALIDATION_FAILED no parâmetro size", function () {
+        client.assert(response.status === 400, "status: " + response.status);
+        client.assert(response.body.code === "VALIDATION_FAILED", "code: " + response.body.code);
+        client.assert(response.body.errors[0].field === "size", "campo: " + response.body.errors[0].field);
+    });
+%}
+
+### 5.12 CEP inexistente → 422 POSTAL_CODE_NOT_FOUND
+# 400 seria "requisição malformada". Aqui o formato está certo (8 dígitos), mas
+# o CEP não existe: a requisição é bem formada e não pode ser processada.
+# Para ver o 503 + Retry-After (ViaCEP fora do ar), suba a API com
+# VIACEP_BASE_URL=http://localhost:9 (porta sem ninguém escutando) e rode o
+# 2.1 de novo.
+POST {{baseUrl}}/api/v1/shipments
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{
+  "origin": { "postalCode": "{{originPostalCode}}", "number": "100" },
+  "destination": { "postalCode": "{{unknownPostalCode}}", "number": "1" },
+  "weightGrams": 1500
+}
+
+> {%
+    client.test("422 POSTAL_CODE_NOT_FOUND", function () {
+        client.assert(response.status === 422, "status: " + response.status);
+        client.assert(response.body.code === "POSTAL_CODE_NOT_FOUND", "code: " + response.body.code);
+    });
+%}
+
+### 5.13 Cancelar um envio já entregue → 409
+# A máquina de estados fica no agregado (Shipment). O dono pode cancelar, mas
+# DELIVERED → CANCELLED não é uma transição permitida.
+POST {{baseUrl}}/api/v1/shipments/{{shipmentId}}/cancel
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{
+  "reason": "Mudei de ideia"
+}
+
+> {%
+    client.test("409 SHIPMENT_INVALID_STATUS_TRANSITION", function () {
+        client.assert(response.status === 409, "status: " + response.status);
+        client.assert(response.body.code === "SHIPMENT_INVALID_STATUS_TRANSITION", "code: " + response.body.code);
+    });
+%}
+
+### 5.14 E-mail já cadastrado → 409
+# O caso de uso confere se o e-mail já existe. Se duas requisições passarem
+# juntas por essa checagem, a constraint uk_users_email do banco barra a
+# segunda, e o adaptador traduz a violação para este mesmo 409 (sem ela,
+# viraria um 500).
+POST {{baseUrl}}/api/v1/users
+Content-Type: application/json
+
+{
+  "email": "{{customerEmail}}",
+  "password": "{{password}}"
+}
+
+> {%
+    client.test("409 EMAIL_ALREADY_REGISTERED", function () {
+        client.assert(response.status === 409, "status: " + response.status);
+        client.assert(response.body.code === "EMAIL_ALREADY_REGISTERED", "code: " + response.body.code);
+    });
+%}
+
+### 5.15 Senha errada → 401 INVALID_CREDENTIALS
+# A resposta é idêntica para e-mail inexistente, e o tempo de resposta também:
+# o serviço calcula um hash "isca" quando o usuário não existe. Assim ninguém
+# descobre quais e-mails estão cadastrados (enumeração de usuários).
+POST {{baseUrl}}/api/v1/auth/token
+Content-Type: application/json
+
+{
+  "email": "{{customerEmail}}",
+  "password": "senha-errada-123"
+}
+
+> {%
+    client.test("401 INVALID_CREDENTIALS", function () {
+        client.assert(response.status === 401, "status: " + response.status);
+        client.assert(response.body.code === "INVALID_CREDENTIALS", "code: " + response.body.code);
+    });
+%}
+
+### 5.16 Correlation ID: do header da requisição ao corpo do erro
+# Mande um X-Correlation-Id e ele volta no header da resposta, no corpo do
+# erro e em cada linha de log da requisição. Sem o header, a API gera um UUID.
+# Só são aceitos letras, dígitos, ".", "_" e "-" (até 64 caracteres); o resto
+# é trocado por um UUID novo, o que impede injetar quebras de linha nos logs.
+GET {{baseUrl}}/api/v1/shipments/00000000-0000-0000-0000-000000000000
+Authorization: Bearer {{customerToken}}
+X-Correlation-Id: estudo-requests-http-516
+
+> {%
+    client.test("404 com o correlationId enviado no header e no corpo", function () {
+        client.assert(response.status === 404, "status: " + response.status);
+        client.assert(response.headers.valueOf("X-Correlation-Id") === "estudo-requests-http-516",
+            "header: " + response.headers.valueOf("X-Correlation-Id"));
+        client.assert(response.body.correlationId === "estudo-requests-http-516",
+            "corpo: " + response.body.correlationId);
+    });
+%}
+
+### 5.17 Rota inexistente → 404 NOT_FOUND
+# Até erros gerados pelo próprio Spring MVC saem em RFC 9457, com code
+# derivado do status HTTP.
+GET {{baseUrl}}/api/v1/rota-que-nao-existe
+Authorization: Bearer {{customerToken}}
+
+> {%
+    client.test("404 NOT_FOUND", function () {
+        client.assert(response.status === 404, "status: " + response.status);
+        client.assert(response.body.code === "NOT_FOUND", "code: " + response.body.code);
+    });
+%}
+
+
+# =============================================================================
+#  6. OPERAÇÃO: health, métricas e contrato
+# =============================================================================
+
+### 6.1 Health (público): só o status agregado
+# Público porque orquestradores e balanceadores consultam sem credencial.
+GET {{baseUrl}}/actuator/health
+
+> {%
+    client.test("200 UP, sem detalhes", function () {
+        client.assert(response.status === 200, "status: " + response.status);
+        client.assert(response.body.status === "UP", "status: " + response.body.status);
+        client.assert(response.body.components === undefined, "detalhes não deveriam aparecer sem token");
+    });
+%}
+
+### 6.2 Health (operador): detalhes de cada dependência
+# PostgreSQL, MongoDB, RabbitMQ, disco e o circuit breaker da ViaCEP. Os
+# detalhes revelam a topologia interna, por isso só aparecem para operadores.
+GET {{baseUrl}}/actuator/health
+Authorization: Bearer {{operatorToken}}
+
+> {%
+    client.test("200 UP, com db, mongo, rabbit e circuitBreakers", function () {
+        var components = response.body.components;
+        client.assert(response.status === 200, "status: " + response.status);
+        client.assert(components.db && components.mongo && components.rabbit && components.circuitBreakers,
+            "componentes: " + Object.keys(components || {}).join());
+    });
+%}
+
+### 6.3 Readiness probe
+# O que o Kubernetes (ou o healthcheck do docker-compose.yml) consulta para
+# decidir se a instância pode receber tráfego.
+GET {{baseUrl}}/actuator/health/readiness
+
+> {%
+    client.test("200 UP", function () {
+        client.assert(response.status === 200, "status: " + response.status);
+    });
+%}
+
+### 6.4 Informações da aplicação: nome, versão e momento do build
+GET {{baseUrl}}/actuator/info
+
+> {%
+    client.test("200 com a versão do build", function () {
+        client.assert(response.status === 200, "status: " + response.status);
+        client.assert(response.body.build.version !== undefined, "build: " + JSON.stringify(response.body.build));
+    });
+%}
+
+### 6.5 Métricas pedidas por um cliente → 403
+# Métricas expõem detalhes internos (rotas, volumes, erros): só operadores.
+GET {{baseUrl}}/actuator/metrics
+Authorization: Bearer {{customerToken}}
+
+> {%
+    client.test("403 ACCESS_DENIED", function () {
+        client.assert(response.status === 403, "status: " + response.status);
+        client.assert(response.body.code === "ACCESS_DENIED", "code: " + response.body.code);
+    });
+%}
+
+### 6.6 Métricas: requisições HTTP por rota e status
+# Experimente filtrar: ?tag=uri:/api/v1/shipments&tag=status:201
+GET {{baseUrl}}/actuator/metrics/http.server.requests
+Authorization: Bearer {{operatorToken}}
+
+> {%
+    client.test("200 OK", function () {
+        client.assert(response.status === 200, "status: " + response.status);
+    });
+%}
+
+### 6.7 Métricas: acertos do cache de CEPs
+# Os envios das seções 2 e 3 repetem a origem 01001-000: só a primeira consulta
+# vai à ViaCEP, as outras saem do cache (Caffeine, 24 h). Troque result:hit por
+# result:miss para ver quantas foram de fato à ViaCEP.
+GET {{baseUrl}}/actuator/metrics/cache.gets?tag=name:postal-codes&tag=result:hit
+Authorization: Bearer {{operatorToken}}
+
+> {%
+    client.test("200 OK", function () {
+        client.assert(response.status === 200, "status: " + response.status);
+    });
+    client.log("Consultas de CEP atendidas pelo cache: " + response.body.measurements[0].value);
+%}
+
+### 6.8 Métricas: estado do circuit breaker da ViaCEP
+# value 1.0 no estado "closed" significa circuito fechado (chamadas passando).
+# Troque para state:open para ver se ele abriu.
+GET {{baseUrl}}/actuator/metrics/resilience4j.circuitbreaker.state?tag=name:viacep&tag=state:closed
+Authorization: Bearer {{operatorToken}}
+
+> {%
+    client.test("200 OK", function () {
+        client.assert(response.status === 200, "status: " + response.status);
+    });
+    client.log("Circuit breaker viacep fechado? " + (response.body.measurements[0].value === 1 ? "sim" : "não"));
+%}
+
+### 6.9 Contrato OpenAPI (o mesmo que alimenta o Swagger UI)
+# Interface navegável em {{baseUrl}}/swagger-ui.html. Em produção, desligue com
+# API_DOCS_ENABLED=false ou restrinja à rede interna.
+GET {{baseUrl}}/v3/api-docs
+
+> {%
+    client.test("200 com o documento OpenAPI 3", function () {
+        client.assert(response.status === 200, "status: " + response.status);
+        client.assert(String(response.body.openapi).indexOf("3.") === 0, "openapi: " + response.body.openapi);
+    });
+%}
