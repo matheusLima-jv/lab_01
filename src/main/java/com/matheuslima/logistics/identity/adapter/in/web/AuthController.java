@@ -49,9 +49,13 @@ public class AuthController {
     @Operation(summary = "Autentica e emite um token de acesso",
             description = "Use o accessToken no header Authorization: Bearer <token>.")
     @ApiResponse(responseCode = "200", description = "Token emitido")
+    @ApiResponse(responseCode = "400", description = "E-mail ou senha ausentes ou longos demais")
     @ApiResponse(responseCode = "401", description = "E-mail ou senha inválidos")
     public TokenResponse issueToken(@Valid @RequestBody TokenRequest request) {
         AccessToken token = authenticateUser.authenticate(new AuthenticateUserCommand(request.email(), request.password()));
+        // Tempo restante medido agora, e não o TTL configurado: a RFC 6749 conta o expires_in a
+        // partir da geração da resposta. O truncamento (1799,9 s vira 1799) erra para o lado
+        // seguro, porque o cliente renova o token um pouco antes, nunca depois.
         long expiresIn = Math.max(0, Duration.between(clock.instant(), token.expiresAt()).toSeconds());
         return new TokenResponse(token.value(), TokenResponse.BEARER, expiresIn, token.expiresAt());
     }

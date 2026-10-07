@@ -111,6 +111,8 @@ public class ShipmentController {
     @GetMapping
     @Operation(summary = "Lista envios",
             description = "Clientes veem os próprios envios; operadores veem todos. Mais recentes primeiro.")
+    @ApiResponse(responseCode = "200", description = "Página de envios")
+    @ApiResponse(responseCode = "400", description = "Parâmetro inválido (status desconhecido, size fora de 1 a 100)")
     public PageResponse<ShipmentResponse> list(
             @Parameter(description = "Filtra por status") @RequestParam(required = false) ShipmentStatus status,
             @Parameter(description = "Página, a partir de 0") @RequestParam(defaultValue = "0") @Min(0) int page,
@@ -124,6 +126,7 @@ public class ShipmentController {
 
     @GetMapping("/{id}")
     @Operation(summary = "Consulta um envio")
+    @ApiResponse(responseCode = "200", description = "Envio encontrado")
     @ApiResponse(responseCode = "404", description = "Inexistente ou de outro cliente")
     public ShipmentResponse get(@PathVariable UUID id, Requester requester) {
         return ShipmentResponse.from(getShipment.get(requester, id));
@@ -136,6 +139,9 @@ public class ShipmentController {
     @PostMapping("/{id}/dispatch")
     @PreAuthorize("hasRole('OPERATOR')")
     @Operation(summary = "Despacha um envio (operadores)", description = "CREATED → IN_TRANSIT")
+    @ApiResponse(responseCode = "200", description = "Envio despachado")
+    @ApiResponse(responseCode = "403", description = "Quem chama não é operador")
+    @ApiResponse(responseCode = "404", description = "Envio inexistente")
     @ApiResponse(responseCode = "409", description = "Transição inválida para o status atual")
     public ShipmentResponse dispatch(@PathVariable UUID id, Requester requester) {
         return changeStatus(requester, id, new StatusChange.Dispatch());
@@ -144,6 +150,9 @@ public class ShipmentController {
     @PostMapping("/{id}/deliver")
     @PreAuthorize("hasRole('OPERATOR')")
     @Operation(summary = "Registra a entrega (operadores)", description = "IN_TRANSIT → DELIVERED")
+    @ApiResponse(responseCode = "200", description = "Entrega registrada")
+    @ApiResponse(responseCode = "403", description = "Quem chama não é operador")
+    @ApiResponse(responseCode = "404", description = "Envio inexistente")
     @ApiResponse(responseCode = "409", description = "Transição inválida para o status atual")
     public ShipmentResponse deliver(@PathVariable UUID id, Requester requester) {
         return changeStatus(requester, id, new StatusChange.Deliver());
@@ -151,6 +160,9 @@ public class ShipmentController {
 
     @PostMapping("/{id}/cancel")
     @Operation(summary = "Cancela um envio", description = "CREATED → CANCELLED. Dono do envio ou operador.")
+    @ApiResponse(responseCode = "200", description = "Envio cancelado")
+    @ApiResponse(responseCode = "400", description = "Motivo ausente ou longo demais")
+    @ApiResponse(responseCode = "404", description = "Inexistente ou de outro cliente")
     @ApiResponse(responseCode = "409", description = "Envio já despachado, entregue ou cancelado")
     public ShipmentResponse cancel(@PathVariable UUID id, @Valid @RequestBody CancelShipmentRequest request,
                                    Requester requester) {
@@ -161,6 +173,8 @@ public class ShipmentController {
     @Operation(summary = "Histórico de rastreamento",
             description = "Linha do tempo do envio. Consistência eventual: pode levar alguns instantes para "
                     + "refletir uma mudança recente.")
+    @ApiResponse(responseCode = "200", description = "Linha do tempo, do evento mais antigo ao mais recente")
+    @ApiResponse(responseCode = "404", description = "Inexistente ou de outro cliente")
     public TrackingHistoryResponse tracking(@PathVariable UUID id, Requester requester) {
         return TrackingHistoryResponse.from(id, getTrackingHistory.history(requester, id));
     }
