@@ -1,0 +1,8 @@
+# Normaliza quebras de linha no repositório. Scripts shell PRECISAM de LF,
+# senão "./mvnw" falha no Linux/macOS com "bad interpreter" quando alguém
+# faz checkout no Windows com autocrlf.
+* text=auto eol=lf
+mvnw text eol=lf
+*.sh text eol=lf
+*.cmd text eol=crlf
+*.jar binary

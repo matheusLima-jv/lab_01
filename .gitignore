@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------------
+# Por que ignorar estes arquivos?
+# - target/: tudo que o Maven gera é reprodutível a partir do código-fonte;
+#   versionar artefatos de build só gera conflitos e diffs ruidosos.
+# - Arquivos de IDE: cada pessoa usa uma IDE; configurações locais não são
+#   parte do projeto. O que precisa ser compartilhado (ex.: estilo) vai no
+#   .editorconfig, que todas as IDEs entendem.
+# - .env: guarda segredos locais (ex.: JWT secret). NUNCA deve ir para o Git;
+#   o modelo versionado é o .env.example.
+# ---------------------------------------------------------------------------
+
+# Build
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+# IDEs
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.classpath
+.project
+.settings/
+.factorypath
+bin/
+out/
+
+# SO
+.DS_Store
+Thumbs.db
+
+# Segredos e configuração local
+.env
+*.local.yml
+application-secrets*.yml
+
+# Logs
+*.log
+logs/

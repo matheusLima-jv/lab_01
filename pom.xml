@@ -1,0 +1,472 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ============================================================================
+  POM do Logistics API
+  ============================================================================
+  Por que Maven (e não Gradle)?
+    - É o build mais comum em projetos Java corporativos no Brasil; quem avalia
+      um case técnico lê um POM sem esforço.
+    - É declarativo: o "como" do build fica nos plugins, o projeto só declara
+      "o quê". Isso reduz a chance de lógica de build espalhada e criativa.
+    - Gradle seria uma escolha igualmente válida (build mais rápido e flexível);
+      a troca não muda nada na arquitetura da aplicação.
+
+  Por que herdar de spring-boot-starter-parent?
+    - Ele traz o BOM (Bill of Materials) do Spring Boot: versões testadas em
+      conjunto de centenas de bibliotecas. Por isso quase nenhuma dependência
+      abaixo declara <version>: quem decide é o BOM, e isso evita o "inferno de
+      dependências" (ex.: Hibernate incompatível com Spring Data).
+    - Também pré-configura plugins (compiler com -parameters, failsafe apontando
+      para target/classes, resources filtering etc.).
+  ============================================================================
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <!--
+          Spring Boot 4.1.x: geração atual (Spring Framework 7, Jakarta EE 11,
+          Jackson 3, Hibernate 7). A linha 3.5 ainda funciona, mas um projeto que
+          serve de BASE para outros deve nascer na geração corrente para não
+          herdar uma migração logo no primeiro dia.
+        -->
+        <version>4.1.1</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.matheuslima</groupId>
+    <artifactId>logistics-api</artifactId>
+    <version>1.0.0</version>
+    <name>Logistics API</name>
+    <description>
+        API de envios e rastreamento construída como referência de arquitetura hexagonal,
+        Clean Architecture e DDD com Spring Boot, PostgreSQL, MongoDB, RabbitMQ e JWT.
+    </description>
+
+    <properties>
+        <!-- Java 21 é LTS e é a versão mínima pedida. O código também compila em 25. -->
+        <java.version>21</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+        <!--
+          Versões de bibliotecas que NÃO são gerenciadas pelo BOM do Spring Boot.
+          Ficam centralizadas aqui para que uma atualização seja uma mudança de
+          uma linha só, fácil de revisar.
+        -->
+        <resilience4j.version>2.4.0</resilience4j.version>
+        <springdoc.version>3.1.1</springdoc.version>
+        <archunit.version>1.5.1</archunit.version>
+        <wiremock.version>3.13.2</wiremock.version>
+        <jacoco.version>0.8.15</jacoco.version>
+
+        <!--
+          Metas de cobertura verificadas no "mvn verify" (ver plugin JaCoCo).
+          Ficam como propriedades para poderem ser ajustadas sem editar o plugin.
+          80% de linhas é um piso comum em empresas; cobertura NÃO mede qualidade
+          de teste, só aponta código que nenhum teste executa.
+        -->
+        <coverage.line.minimum>0.85</coverage.line.minimum>
+        <coverage.branch.minimum>0.75</coverage.branch.minimum>
+
+        <!--
+          argLine vazio por padrão: o JaCoCo preenche essa propriedade com o seu
+          agente. Declarar o valor padrão evita que "@{argLine}" fique literal (e
+          quebre a JVM de testes) quando o JaCoCo for pulado com -Djacoco.skip.
+        -->
+        <argLine/>
+    </properties>
+
+    <dependencies>
+        <!-- ===================== Web / API REST ===================== -->
+        <!--
+          No Boot 4 os starters foram modularizados: "webmvc" substitui o antigo
+          "web". O servidor embarcado padrão continua sendo o Tomcat.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc</artifactId>
+        </dependency>
+        <!-- Bean Validation (Hibernate Validator) para validar DTOs na borda HTTP. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <!-- OpenAPI 3 + Swagger UI gerados a partir dos controllers. -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>${springdoc.version}</version>
+        </dependency>
+
+        <!-- ===================== Segurança (JWT) ===================== -->
+        <!--
+          Resource Server do Spring Security: valida o Bearer token em cada
+          requisição usando um filtro pronto e testado pela comunidade (em vez de
+          escrevermos um filtro JWT "na mão"). Traz o Nimbus JOSE+JWT, que também
+          usamos para EMITIR o token no login.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security-oauth2-resource-server</artifactId>
+        </dependency>
+
+        <!-- ===================== Persistência relacional ===================== -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <!--
+          Flyway versiona o schema. No Boot 4 a auto-configuração do Flyway saiu do
+          núcleo e precisa do starter próprio (só a lib flyway-core não basta).
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-flyway</artifactId>
+        </dependency>
+        <!-- Desde o Flyway 10 o suporte a cada banco fica em um módulo separado. -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- ===================== Persistência NoSQL ===================== -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-mongodb</artifactId>
+        </dependency>
+
+        <!-- ===================== Mensageria ===================== -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-amqp</artifactId>
+        </dependency>
+
+        <!-- ===================== Integração HTTP externa ===================== -->
+        <!-- Auto-configura o RestClient.Builder (cliente HTTP síncrono do Spring 6.1+). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-restclient</artifactId>
+        </dependency>
+        <!--
+          Resilience4j: retry e circuit breaker configurados via YAML, com métricas
+          e health indicators expostos pelo Actuator.
+        -->
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-spring-boot4</artifactId>
+            <version>${resilience4j.version}</version>
+        </dependency>
+        <!-- Cache em memória (Caffeine) para consultas de CEP, que mudam raramente. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-cache</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+        </dependency>
+
+        <!-- ===================== Observabilidade ===================== -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!--
+          Gera metadados das classes @ConfigurationProperties: a IDE passa a
+          autocompletar e documentar as chaves "app.*" no application.yml.
+          "optional" para não vazar para quem depender deste artefato.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-configuration-processor</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- ===================== Testes ===================== -->
+        <!-- JUnit Jupiter, AssertJ, Mockito, JSONassert, Awaitility etc. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- No Boot 4 cada "fatia" de teste (@WebMvcTest, @DataJpaTest...) tem seu starter. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-mongodb-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- @ServiceConnection: liga containers do Testcontainers ao Spring sem configurar URLs. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
+          Testcontainers sobe PostgreSQL, MongoDB e RabbitMQ REAIS em Docker durante
+          os testes de integração. Testar contra o banco real (e não H2) evita a
+          classe de bugs "passa no teste, quebra em produção" por diferença de
+          dialeto SQL, tipos (JSONB, TIMESTAMPTZ) e comportamento de locks.
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-mongodb</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-rabbitmq</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
+          WireMock simula a API externa (ViaCEP) com HTTP de verdade: permite testar
+          timeouts, erros 5xx e respostas inesperadas sem depender da internet.
+          A versão "standalone" embute (shade) as próprias dependências, evitando
+          conflito com o Jetty/Jackson da aplicação.
+        -->
+        <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock-standalone</artifactId>
+            <version>${wiremock.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- Regras de arquitetura executáveis (ex.: "domínio não depende de Spring"). -->
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit</artifactId>
+            <version>${archunit.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+              Falha cedo se a máquina não tiver Java 21+ ou Maven 3.9+, com uma
+              mensagem clara, em vez de um erro de compilação confuso.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>enforce-build-environment</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <requireJavaVersion>
+                                    <version>[21,)</version>
+                                </requireJavaVersion>
+                                <requireMavenVersion>
+                                    <version>[3.9,)</version>
+                                </requireMavenVersion>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+              Gera o fat jar executável e o build-info.properties (exibido em
+              /actuator/info: versão, data do build). O fat jar é o que vai para a
+              imagem Docker.
+            -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>build-info</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.springframework.boot</groupId>
+                            <artifactId>spring-boot-configuration-processor</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+
+            <!--
+              Expõe o caminho do jar do Mockito como propriedade Maven, para
+              carregá-lo como -javaagent nos testes. Desde o JDK 21 a JVM avisa
+              quando um agente é anexado dinamicamente (JEP 451) e versões futuras
+              vão bloquear isso; declarar o agente explicitamente é a forma
+              recomendada pela própria documentação do Mockito.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>mockito-agent-path</id>
+                        <goals>
+                            <goal>properties</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+              Convenção de nomes dos testes (padrão do Maven):
+                *Test.java -> Surefire (fase "test"): testes rápidos, só JVM, sem Docker.
+                *IT.java   -> Failsafe (fase "integration-test"): precisam de Docker
+                              (Testcontainers) ou sobem a aplicação inteira.
+              Assim "mvn test" dá feedback em segundos e "mvn verify" roda tudo.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <argLine>@{argLine} -javaagent:${org.mockito:mockito-core:jar} -Xshare:off</argLine>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <argLine>@{argLine} -javaagent:${org.mockito:mockito-core:jar} -Xshare:off</argLine>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+              JaCoCo mede cobertura dos testes unitários (jacoco.exec) e de
+              integração (jacoco-it.exec), junta os dois arquivos e falha o build
+              se a cobertura cair abaixo das metas definidas nas properties.
+              Juntar é importante: adaptadores (JPA, RabbitMQ, ViaCEP) só são
+              exercitados pelos testes de integração.
+            -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco.version}</version>
+                <configuration>
+                    <excludes>
+                        <!-- Ponto de entrada sem lógica: só chama SpringApplication.run. -->
+                        <exclude>com/matheuslima/logistics/LogisticsApplication.class</exclude>
+                    </excludes>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>prepare-agent-integration</id>
+                        <goals>
+                            <goal>prepare-agent-integration</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>merge-results</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>merge</goal>
+                        </goals>
+                        <configuration>
+                            <fileSets>
+                                <fileSet>
+                                    <directory>${project.build.directory}</directory>
+                                    <includes>
+                                        <include>jacoco.exec</include>
+                                        <include>jacoco-it.exec</include>
+                                    </includes>
+                                </fileSet>
+                            </fileSets>
+                            <destFile>${project.build.directory}/jacoco-merged.exec</destFile>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>report-merged</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                        <configuration>
+                            <dataFile>${project.build.directory}/jacoco-merged.exec</dataFile>
+                            <outputDirectory>${project.reporting.outputDirectory}/jacoco</outputDirectory>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>check-coverage</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <configuration>
+                            <dataFile>${project.build.directory}/jacoco-merged.exec</dataFile>
+                            <rules>
+                                <rule>
+                                    <element>BUNDLE</element>
+                                    <limits>
+                                        <limit>
+                                            <counter>LINE</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>${coverage.line.minimum}</minimum>
+                                        </limit>
+                                        <limit>
+                                            <counter>BRANCH</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>${coverage.branch.minimum}</minimum>
+                                        </limit>
+                                    </limits>
+                                </rule>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
