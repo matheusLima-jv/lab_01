@@ -1,0 +1,116 @@
+# =============================================================================
+# Ambiente completo da Logistics API para desenvolvimento e demonstração
+# =============================================================================
+# Subir tudo (API + infraestrutura):       docker compose up --build -d
+# Só a infraestrutura (API rodando na IDE):  docker compose up -d postgres mongo rabbitmq
+# Derrubar e apagar os dados:               docker compose down -v
+#
+# Endereços depois de subir:
+#   API ............ http://localhost:8080
+#   Swagger UI ..... http://localhost:8080/swagger-ui.html
+#   RabbitMQ UI .... http://localhost:15672  (logistics / logistics)
+#
+# Segredos: este arquivo tem valores de DESENVOLVIMENTO como padrão (sintaxe
+# ${VAR:-padrao}). Para trocá-los, crie um arquivo .env a partir do .env.example;
+# o docker compose lê o .env automaticamente. Nunca use estes padrões em
+# ambientes compartilhados.
+# =============================================================================
+
+name: logistics
+
+services:
+  postgres:
+    # Mesma versão usada pelos testes (ContainerImages): o que passa no teste é
+    # o que roda aqui.
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: logistics
+      POSTGRES_USER: logistics
+      POSTGRES_PASSWORD: logistics
+    ports:
+      - "5432:5432"
+    volumes:
+      # Volume nomeado: os dados sobrevivem a "docker compose down" (só somem com -v).
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # "Container de pé" não significa "banco aceitando conexões". O healthcheck
+      # permite que a API só suba depois que o banco estiver pronto (depends_on).
+      test: ["CMD-SHELL", "pg_isready -U logistics -d logistics"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mongo:
+    image: mongo:8.0
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    # Variante "management": inclui o painel web (porta 15672), útil para ver
+    # exchanges, filas, mensagens na DLQ e taxas de publicação/consumo.
+    image: rabbitmq:4.1-management-alpine
+    environment:
+      # O usuário padrão "guest" do RabbitMQ só aceita conexões de localhost.
+      # Como a API se conecta a partir de outro container, criamos um usuário.
+      RABBITMQ_DEFAULT_USER: logistics
+      RABBITMQ_DEFAULT_PASS: logistics
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  app:
+    build: .
+    image: logistics-api:1.0.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      # Configuração por variáveis de ambiente (12-factor): a mesma imagem roda
+      # em qualquer ambiente, só mudando estas variáveis.
+      DB_URL: jdbc:postgresql://postgres:5432/logistics
+      DB_USERNAME: logistics
+      DB_PASSWORD: logistics
+      MONGODB_URI: mongodb://mongo:27017/logistics
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USERNAME: logistics
+      RABBITMQ_PASSWORD: logistics
+      # SOMENTE DESENVOLVIMENTO: substitua via .env (JWT_SECRET=$(openssl rand -base64 32)).
+      APP_SECURITY_JWT_SECRET: ${JWT_SECRET:-ZGV2LW9ubHktc2VjcmV0LWNoYW5nZS1tZS1pbi1wcm9kdWN0aW9uLTEyMzQ1Ng==}
+      BOOTSTRAP_OPERATOR_ENABLED: "true"
+      BOOTSTRAP_OPERATOR_EMAIL: ${OPERATOR_EMAIL:-operador@logistics.local}
+      BOOTSTRAP_OPERATOR_PASSWORD: ${OPERATOR_PASSWORD:-operador-local-123}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:3000}
+      # Logs estruturados em JSON (formato Elastic Common Schema): prontos para
+      # ELK, Loki ou Datadog, com o correlationId (MDC) em cada linha.
+      LOGGING_STRUCTURED_FORMAT_CONSOLE: ecs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health/readiness > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      start_period: 60s
+      retries: 5
+
+volumes:
+  postgres-data:
+  mongo-data:
+  rabbitmq-data:

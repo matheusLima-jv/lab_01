@@ -1,0 +1,77 @@
+# =============================================================================
+# Integração contínua
+# =============================================================================
+# A cada push na main e a cada pull request:
+#   1. compila, roda TODOS os testes (unitários, fatias, integração com
+#      Testcontainers, arquitetura) e verifica a cobertura mínima (JaCoCo);
+#   2. constrói a imagem Docker, provando que o Dockerfile continua válido.
+# Os runners do GitHub (ubuntu-latest) já têm Docker, o que o Testcontainers precisa.
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Menor privilégio: o workflow só precisa ler o código.
+permissions:
+  contents: read
+
+# Um push novo no mesmo branch cancela a execução anterior, ainda em andamento.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build, testes e cobertura
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Java 21 (Temurin) com cache do Maven
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: mvn verify
+        run: ./mvnw -B verify
+
+      - name: Relatório de cobertura (JaCoCo)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jacoco-report
+          path: target/site/jacoco
+          if-no-files-found: ignore
+
+      - name: Relatórios de teste (só quando falha)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports
+          path: |
+            target/surefire-reports
+            target/failsafe-reports
+
+  docker:
+    name: Imagem Docker
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Build da imagem (sem publicar)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          tags: logistics-api:ci
+          # Cache de camadas entre execuções do CI (cache do próprio GitHub Actions).
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

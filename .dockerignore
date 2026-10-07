@@ -1,0 +1,15 @@
+# O "contexto" do docker build é tudo o que é enviado ao Docker daemon. Excluir
+# o que não é usado no build deixa o envio mais rápido e evita que arquivos
+# locais (ex.: .env com segredos) acabem dentro de uma camada da imagem.
+target/
+.git/
+.github/
+.idea/
+.vscode/
+*.iml
+.env
+docs/
+*.md
+docker-compose.yml
+Dockerfile
+.dockerignore

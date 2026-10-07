@@ -84,8 +84,10 @@ spring:
   rabbitmq:
     host: ${RABBITMQ_HOST:localhost}
     port: ${RABBITMQ_PORT:5672}
-    username: ${RABBITMQ_USERNAME:guest}
-    password: ${RABBITMQ_PASSWORD:guest}
+    # Mesmo usuário do docker-compose.yml. O "guest" padrão do RabbitMQ só aceita
+    # conexões vindas de localhost, então não serve quando a API roda em container.
+    username: ${RABBITMQ_USERNAME:logistics}
+    password: ${RABBITMQ_PASSWORD:logistics}
     # Publisher confirms: o broker confirma cada mensagem recebida, e o relay
     # do outbox só marca a mensagem como publicada depois da confirmação.
     publisher-confirm-type: correlated
