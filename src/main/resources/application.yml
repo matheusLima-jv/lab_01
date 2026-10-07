@@ -1,0 +1,274 @@
+# =============================================================================
+# Configuração base da Logistics API
+# =============================================================================
+# Princípios adotados (ver docs/11-beans-e-configuracao.md):
+#  1. Este arquivo é a FONTE ÚNICA dos valores de configuração. As classes
+#     @ConfigurationProperties apenas validam (não têm valores padrão).
+#  2. Tudo que muda por ambiente usa ${VARIAVEL:padrao-local}. O padrão aponta
+#     para a infraestrutura local (docker compose), para "clonar e rodar".
+#  3. SEGREDOS NÃO TÊM PADRÃO. O segredo do JWT vem só da variável de ambiente
+#     APP_SECURITY_JWT_SECRET. Se ela faltar, a aplicação não sobe (fail fast),
+#     o que é melhor do que subir com um segredo conhecido. O perfil "local"
+#     (application-local.yml) e os testes definem um segredo de desenvolvimento.
+#  4. Variáveis de ambiente sobrescrevem qualquer chave por "relaxed binding":
+#     SPRING_DATASOURCE_URL -> spring.datasource.url, APP_OUTBOX_BATCH_SIZE ->
+#     app.outbox.batch-size, e assim por diante (padrão 12-factor app).
+# =============================================================================
+
+spring:
+  application:
+    name: logistics-api
+
+  threads:
+    virtual:
+      # Virtual threads (Java 21, Project Loom): cada requisição roda numa thread
+      # virtual, barata de criar e de bloquear. Chamadas bloqueantes (JDBC, HTTP
+      # para a ViaCEP) não prendem threads do sistema operacional, então a
+      # aplicação atende mais requisições simultâneas com o mesmo hardware.
+      # O que NÃO é verdade: "virtual threads deixam o banco mais rápido". A
+      # vazão do banco continua limitada pelo pool de conexões (abaixo).
+      enabled: true
+
+  # --------------------------------------------------------------------------
+  # PostgreSQL (fonte da verdade: usuários, envios, outbox)
+  # --------------------------------------------------------------------------
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/logistics}
+    username: ${DB_USERNAME:logistics}
+    password: ${DB_PASSWORD:logistics}
+    hikari:
+      # Pool pequeno é mais rápido do que pool grande: o banco tem poucos núcleos
+      # e conexões demais só disputam CPU e locks. Fórmula de partida da equipe
+      # do HikariCP: (núcleos do servidor de banco * 2) + discos.
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+      # Falha rápido (5 s) se não houver conexão livre, em vez de deixar a
+      # requisição pendurada por 30 s (o padrão).
+      connection-timeout: 5000
+      pool-name: logistics-pool
+
+  jpa:
+    # Open Session In View DESLIGADO. Ligado (padrão do Spring Boot, que emite
+    # um aviso no log), a conexão com o banco fica presa durante toda a
+    # requisição, inclusive na serialização do JSON, e consultas "lazy"
+    # escondidas acontecem fora da camada de aplicação. Desligado, todo acesso
+    # ao banco acontece dentro das transações explícitas dos casos de uso.
+    open-in-view: false
+    hibernate:
+      # O schema é do Flyway; o Hibernate só confere se as entidades batem com
+      # ele. Divergência = a aplicação não sobe.
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  # --------------------------------------------------------------------------
+  # MongoDB (read model do histórico de rastreamento)
+  # --------------------------------------------------------------------------
+  mongodb:
+    uri: ${MONGODB_URI:mongodb://localhost:27017/logistics}
+  data:
+    mongodb:
+      # Cria os índices declarados com @CompoundIndex na subida. Prático e
+      # suficiente aqui; em produção com coleções grandes, índices costumam ser
+      # criados por migração controlada (ex.: Mongock) ou pelo time de dados.
+      auto-index-creation: true
+
+  # --------------------------------------------------------------------------
+  # RabbitMQ
+  # --------------------------------------------------------------------------
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    # Publisher confirms: o broker confirma cada mensagem recebida, e o relay
+    # do outbox só marca a mensagem como publicada depois da confirmação.
+    publisher-confirm-type: correlated
+    listener:
+      simple:
+        # Quantas mensagens o broker entrega de uma vez a cada consumidor antes
+        # de receber os acks. Equilibra vazão e distribuição justa da carga.
+        prefetch: 20
+        # Mensagem que falhou depois de todas as retentativas NÃO volta para a
+        # fila (evita loop infinito); vai para a dead letter queue.
+        default-requeue-rejected: false
+        retry:
+          # Retentativas em memória, no próprio consumidor, com backoff
+          # exponencial (1 s, 2 s, 4 s). Resolvem falhas transitórias (ex.:
+          # MongoDB reiniciando) sem devolver a mensagem ao broker.
+          enabled: true
+          max-retries: 3
+          initial-interval: 1s
+          multiplier: 2
+          max-interval: 10s
+
+  cache:
+    cache-names: postal-codes
+    caffeine:
+      # Até 10 mil CEPs por 24 h. CEP muda raramente; o limite de tamanho evita
+      # que o cache cresça sem controle e cause falta de memória.
+      spec: maximumSize=10000,expireAfterWrite=24h
+
+  mvc:
+    problemdetails:
+      # Erros do próprio Spring MVC (JSON malformado, método não suportado,
+      # rota inexistente...) também saem no formato RFC 9457.
+      enabled: true
+
+  lifecycle:
+    # No desligamento, espera até 20 s as requisições em andamento terminarem.
+    timeout-per-shutdown-phase: 20s
+
+server:
+  port: ${SERVER_PORT:8080}
+  # Graceful shutdown: ao receber SIGTERM (ex.: deploy no Kubernetes), para de
+  # aceitar requisições novas e termina as que estão em andamento.
+  shutdown: graceful
+
+# -----------------------------------------------------------------------------
+# Actuator: saúde, informações e métricas
+# -----------------------------------------------------------------------------
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      # /actuator/health/liveness (o processo está vivo?) e
+      # /actuator/health/readiness (consegue atender?) para orquestradores.
+      probes:
+        enabled: true
+      # Detalhes (estado do banco, broker, circuit breakers) só para operadores.
+      show-details: when-authorized
+      roles: OPERATOR
+  health:
+    circuitbreakers:
+      enabled: true
+  info:
+    env:
+      enabled: true
+
+info:
+  application:
+    name: Logistics API
+    description: API de envios e rastreamento (referência de arquitetura hexagonal + DDD)
+
+# -----------------------------------------------------------------------------
+# Resilience4j: proteção da integração com a ViaCEP
+# -----------------------------------------------------------------------------
+resilience4j:
+  retry:
+    instances:
+      viacep:
+        # 2 tentativas no total (1 retry). Mais do que isso multiplica a
+        # latência no pior caso sem aumentar muito a chance de sucesso.
+        max-attempts: 2
+        wait-duration: 200ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        # Só falhas transitórias. Um 4xx repetido teria o mesmo resultado.
+        retry-exceptions:
+          - org.springframework.web.client.ResourceAccessException
+          - org.springframework.web.client.HttpServerErrorException
+  circuitbreaker:
+    instances:
+      viacep:
+        # Avalia as últimas 10 chamadas; com pelo menos 5 registradas e 50% ou
+        # mais de falhas, o circuito abre por 30 s. Depois deixa passar 2
+        # chamadas de teste (half-open) antes de decidir se fecha.
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 2
+        automatic-transition-from-open-to-half-open-enabled: true
+        record-exceptions:
+          - org.springframework.web.client.ResourceAccessException
+          - org.springframework.web.client.HttpServerErrorException
+        register-health-indicator: true
+
+# -----------------------------------------------------------------------------
+# Configuração da aplicação (classes @ConfigurationProperties, validadas na subida)
+# -----------------------------------------------------------------------------
+app:
+  security:
+    jwt:
+      issuer: logistics-api
+      access-token-ttl: 30m
+      # secret: NÃO definido aqui de propósito. Use APP_SECURITY_JWT_SECRET.
+    cors:
+      # Origens (front-ends) autorizadas a chamar a API pelo navegador, separadas
+      # por vírgula. Vazio = nenhuma (a API não é chamada direto por browsers).
+      allowed-origins: ${CORS_ALLOWED_ORIGINS:}
+
+  bootstrap:
+    operator:
+      # Cria um usuário operador na subida (se ainda não existir). Desligado
+      # por padrão; o perfil local e o docker compose ligam com credenciais de
+      # desenvolvimento.
+      enabled: false
+      email: ""
+      password: ""
+
+  outbox:
+    batch-size: 50
+    confirm-timeout: 5s
+    relay:
+      enabled: true
+      initial-delay: 2s
+      fixed-delay: 1s
+
+  integrations:
+    viacep:
+      base-url: ${VIACEP_BASE_URL:https://viacep.com.br}
+      connect-timeout: 1s
+      read-timeout: 2s
+
+  shipping:
+    freight:
+      # Tabela de frete (ver FreightCalculator). Em produção viria de uma
+      # tabela no banco ou de um serviço de precificação.
+      currency: BRL
+      same-city-base: 12.00
+      same-state-base: 18.00
+      same-region-base: 25.00
+      interregional-base: 35.00
+      per-kilogram: 2.50
+
+  messaging:
+    shipping:
+      exchange: logistics.shipping.events
+      tracking-queue: logistics.shipping.tracking
+      dead-letter-exchange: logistics.shipping.events.dlx
+      tracking-dead-letter-queue: logistics.shipping.tracking.dlq
+
+# -----------------------------------------------------------------------------
+# OpenAPI / Swagger UI
+# -----------------------------------------------------------------------------
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    # Lembra o token entre recarregamentos da página (conveniência de dev).
+    persist-authorization: true
+    operations-sorter: method
+
+# -----------------------------------------------------------------------------
+# Logs
+# -----------------------------------------------------------------------------
+logging:
+  pattern:
+    # Inclui o correlation ID (ver CorrelationIdFilter) em toda linha de log:
+    # filtrando por ele, encontramos todos os logs de uma requisição.
+    correlation: "[${spring.application.name:},%X{correlationId:-}] "
+  level:
+    root: INFO
+    com.matheuslima.logistics: INFO
