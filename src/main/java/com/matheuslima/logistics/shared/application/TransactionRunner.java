@@ -36,6 +36,8 @@ public interface TransactionRunner {
      * @param work trabalho a executar
      * @param <T>  tipo do retorno
      * @return o valor produzido pelo bloco
+     * @throws ConcurrentUpdateException se, no commit, for detectado que outra transação alterou
+     *         os mesmos dados (bloqueio otimista)
      */
     <T> T inTransaction(Supplier<T> work);
 
