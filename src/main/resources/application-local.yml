@@ -1,0 +1,34 @@
+# =============================================================================
+# Perfil "local": desenvolvimento na máquina do desenvolvedor
+# =============================================================================
+# Ativação: SPRING_PROFILES_ACTIVE=local (ou -Dspring.profiles.active=local na
+# IDE). A infraestrutura (PostgreSQL, MongoDB, RabbitMQ) é a do
+# "docker compose up -d postgres mongo rabbitmq", nas portas padrão.
+#
+# Por que um perfil só para isso? Valores que facilitam a vida em
+# desenvolvimento NÃO podem existir no application.yml base, porque viriam
+# junto para produção. Aqui ficam isolados e explícitos.
+# =============================================================================
+
+app:
+  security:
+    jwt:
+      # SOMENTE DESENVOLVIMENTO. Segredo público (está no Git): qualquer pessoa
+      # consegue forjar tokens para quem usar este valor. Em qualquer ambiente
+      # compartilhado, defina APP_SECURITY_JWT_SECRET (openssl rand -base64 32).
+      secret: ZGV2LW9ubHktc2VjcmV0LWNoYW5nZS1tZS1pbi1wcm9kdWN0aW9uLTEyMzQ1Ng==
+    cors:
+      # Front-ends comuns em desenvolvimento (Vite, Create React App, Angular).
+      allowed-origins: http://localhost:5173,http://localhost:3000,http://localhost:4200
+
+  bootstrap:
+    operator:
+      # Conta de operador para testar despacho/entrega localmente.
+      enabled: true
+      email: operador@logistics.local
+      password: operador-local-123
+
+logging:
+  level:
+    # Mais detalhe do nosso código em desenvolvimento.
+    com.matheuslima.logistics: DEBUG

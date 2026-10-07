@@ -111,8 +111,10 @@ spring:
     cache-names: postal-codes
     caffeine:
       # Até 10 mil CEPs por 24 h. CEP muda raramente; o limite de tamanho evita
-      # que o cache cresça sem controle e cause falta de memória.
-      spec: maximumSize=10000,expireAfterWrite=24h
+      # que o cache cresça sem controle e cause falta de memória. recordStats
+      # publica hits/misses no Actuator (cache.gets), o que mostra se o cache
+      # está de fato poupando chamadas à ViaCEP.
+      spec: maximumSize=10000,expireAfterWrite=24h,recordStats
 
   mvc:
     problemdetails:
@@ -213,9 +215,9 @@ app:
       # Cria um usuário operador na subida (se ainda não existir). Desligado
       # por padrão; o perfil local e o docker compose ligam com credenciais de
       # desenvolvimento.
-      enabled: false
-      email: ""
-      password: ""
+      enabled: ${BOOTSTRAP_OPERATOR_ENABLED:false}
+      email: ${BOOTSTRAP_OPERATOR_EMAIL:}
+      password: ${BOOTSTRAP_OPERATOR_PASSWORD:}
 
   outbox:
     batch-size: 50
@@ -253,9 +255,13 @@ app:
 # OpenAPI / Swagger UI
 # -----------------------------------------------------------------------------
 springdoc:
+  # Documentação ligada por padrão (útil em dev/homologação). Em produção pública,
+  # desligue com API_DOCS_ENABLED=false ou restrinja o acesso à rede interna.
   api-docs:
+    enabled: ${API_DOCS_ENABLED:true}
     path: /v3/api-docs
   swagger-ui:
+    enabled: ${API_DOCS_ENABLED:true}
     path: /swagger-ui.html
     # Lembra o token entre recarregamentos da página (conveniência de dev).
     persist-authorization: true
