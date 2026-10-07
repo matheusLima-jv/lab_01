@@ -1,0 +1,46 @@
+# =============================================================================
+# Perfil "test": usado pelos testes de integração de ponta a ponta
+# =============================================================================
+# Só sobrescreve o necessário para testes rápidos e determinísticos. Todo o
+# resto vem do application.yml de produção, então os testes também validam a
+# configuração real.
+# =============================================================================
+
+app:
+  security:
+    jwt:
+      secret: dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdC0xMjM=
+  bootstrap:
+    operator:
+      enabled: true
+      email: operador@test.local
+      password: operador-test-123
+  outbox:
+    relay:
+      # Relay mais frequente: os testes esperam a consistência eventual em
+      # milissegundos, e não em segundos.
+      initial-delay: 0s
+      fixed-delay: 200ms
+  # A URL da ViaCEP aponta para o WireMock (definida em AbstractIntegrationTest).
+
+spring:
+  rabbitmq:
+    listener:
+      simple:
+        retry:
+          # Mensagens venenosas chegam à DLQ rapidamente nos testes.
+          initial-interval: 100ms
+          max-retries: 1
+
+resilience4j:
+  retry:
+    instances:
+      viacep:
+        wait-duration: 10ms
+  circuitbreaker:
+    instances:
+      viacep:
+        # O circuit breaker é testado em isolamento (ViaCepPostalCodeLookupTest).
+        # Aqui ele não pode abrir, senão um teste que simula falhas afetaria os
+        # outros testes que compartilham o mesmo contexto Spring.
+        minimum-number-of-calls: 1000

@@ -67,11 +67,14 @@
         <!--
           Metas de cobertura verificadas no "mvn verify" (ver plugin JaCoCo).
           Ficam como propriedades para poderem ser ajustadas sem editar o plugin.
-          80% de linhas é um piso comum em empresas; cobertura NÃO mede qualidade
-          de teste, só aponta código que nenhum teste executa.
+          A cobertura atual fica acima de 95% de linhas; o piso de 90%/80% deixa
+          folga para evoluir sem travar o build a cada linha nova.
+          O que NÃO é verdade: cobertura alta não prova que os testes são bons.
+          Ela só aponta código que nenhum teste executa. Asserções fracas também
+          "cobrem" linhas.
         -->
-        <coverage.line.minimum>0.85</coverage.line.minimum>
-        <coverage.branch.minimum>0.75</coverage.branch.minimum>
+        <coverage.line.minimum>0.90</coverage.line.minimum>
+        <coverage.branch.minimum>0.80</coverage.branch.minimum>
 
         <!--
           argLine vazio por padrão: o JaCoCo preenche essa propriedade com o seu
